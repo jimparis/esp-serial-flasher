@@ -15,21 +15,34 @@ static const struct device *uart_dev;
 static const struct device *reset_dev;
 static const struct device *boot_dev;
 static K_TIMER_DEFINE(loader_timer, NULL, NULL);
-static K_SEM_DEFINE(uart_got_event, 0, 1);
-static enum uart_event_type last_event;
+K_MSGQ_DEFINE(rx_queue, 1, 64, 1);
+K_MSGQ_DEFINE(tx_queue, 1, 64, 1);
+static K_SEM_DEFINE(tx_queue_empty, 0, 1);
 
-static void uart_cb(const struct device *dev, struct uart_event *evt, void *ctx)
+static void uart_isr_cb(const struct device *dev, void *ctx)
 {
-        ARG_UNUSED(dev);
         ARG_UNUSED(ctx);
-        switch (evt->type) {
-        case UART_TX_DONE:
-        case UART_TX_ABORTED:
-                last_event = evt->type;
-                k_sem_give(&uart_got_event);
-        default:
-                LOG_DBG("unhandled uart event %d", evt->type);
-                break;
+        uint8_t ch;
+
+        while (uart_irq_update(dev) && uart_irq_is_pending(dev))
+        {
+                /* Anything to transmit? */
+                if (uart_irq_tx_ready(dev))
+                {
+                        if (k_msgq_get(&tx_queue, &ch, K_NO_WAIT) >= 0) {
+                                uart_fifo_fill(dev, &ch, 1);
+                        } else {
+                                k_sem_give(&tx_queue_empty);
+                                uart_irq_tx_disable(dev);
+                        }
+                }
+
+                /* Anything to receive? */
+                if (uart_irq_rx_ready(dev))
+                {
+                        while (uart_fifo_read(dev, &ch, sizeof(ch)))
+                                k_msgq_put(&rx_queue, &ch, K_NO_WAIT);
+                }
         }
 }
 
@@ -43,21 +56,11 @@ esp_loader_error_t loader_port_serial_init(const loader_serial_config_t *config)
 
         uart_dev = device_get_binding(DT_INST_BUS_LABEL(0));
 
-        printk("UART dev is %p\n", uart_dev);
-        printk("UART api is %p\n", uart_dev->api);
-
         /* Make sure speed is at the default value */
         err = loader_port_change_baudrate(
                 DT_PROP(DT_BUS(DT_DRV_INST(0)), current_speed));
         if (err != ESP_LOADER_SUCCESS)
                 return err;
-
-        /* Set up UART callback */
-        ret = uart_callback_set(uart_dev, uart_cb, NULL);
-        if (ret < 0) {
-                LOG_ERR("uart callback: %d", ret);
-                return ESP_LOADER_ERROR_FAIL;
-        }
 
         /* Initialize control pins */
         reset_dev = device_get_binding(DT_INST_GPIO_LABEL(0, wifi_reset_gpios));
@@ -80,47 +83,55 @@ esp_loader_error_t loader_port_serial_init(const loader_serial_config_t *config)
                 return ESP_LOADER_ERROR_FAIL;
         }
 
+        /* Enable rx interrupts */
+        uart_irq_callback_set(uart_dev, uart_isr_cb);
+        uart_irq_rx_enable(uart_dev);
+
         return ESP_LOADER_SUCCESS;
 }
 
 esp_loader_error_t loader_port_serial_write(const uint8_t *data, uint16_t size,
                                             uint32_t timeout)
 {
-        int ret;
+        uint64_t end = z_timeout_end_calc(K_MSEC(timeout));
+        int64_t remaining;
 
-        ret = uart_tx(uart_dev, data, size, timeout);
-        if (ret < 0) {
-                LOG_ERR("serial_write: %d", ret);
-                return ESP_LOADER_ERROR_FAIL;
+        while (size) {
+                remaining = end - z_tick_get();
+                if (remaining <= 0)
+                        goto timeout;
+                if (k_msgq_put(&tx_queue, data, Z_TIMEOUT_TICKS(remaining)) < 0)
+                        goto timeout;
+                uart_irq_tx_enable(uart_dev);
+                data++;
+                size--;
         }
-        k_sem_take(&uart_got_event, K_FOREVER);
-        switch (last_event) {
-        case UART_TX_DONE:
-                return ESP_LOADER_SUCCESS;
-        case UART_TX_ABORTED:
-                return ESP_LOADER_ERROR_TIMEOUT;
-        default:
-                LOG_ERR("unexpected event %d", last_event);
-                return ESP_LOADER_ERROR_FAIL;
-        }
+        remaining = end - z_tick_get();
+        if (k_sem_take(&tx_queue_empty, Z_TIMEOUT_TICKS(remaining)) < 0)
+                goto timeout;
+        return ESP_LOADER_SUCCESS;
+timeout:
+        return ESP_LOADER_ERROR_TIMEOUT;
 }
 
 esp_loader_error_t loader_port_serial_read(uint8_t *data, uint16_t size,
                                            uint32_t timeout)
 {
-        int ret;
+        uint64_t end = z_timeout_end_calc(K_MSEC(timeout));
+        int64_t remaining;
 
-        ret = uart_rx_enable(uart_dev, data, size, timeout);
-        if (ret < 0) {
-                LOG_ERR("serial_read: %d", ret);
-                return ESP_LOADER_ERROR_FAIL;
+        while (size) {
+                remaining = end - z_tick_get();
+                if (remaining <= 0)
+                        goto timeout;
+                if (k_msgq_get(&rx_queue, data, Z_TIMEOUT_TICKS(remaining)) < 0)
+                        goto timeout;
+                data++;
+                size--;
         }
-        k_sem_take(&uart_got_event, K_FOREVER);
-        switch (last_event) {
-        default:
-                LOG_ERR("unexpected event %d", last_event);
-                return ESP_LOADER_ERROR_FAIL;
-        }
+        return ESP_LOADER_SUCCESS;
+timeout:
+        return ESP_LOADER_ERROR_TIMEOUT;
 }
 
 void loader_port_enter_bootloader(void)

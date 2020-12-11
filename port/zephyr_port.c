@@ -12,7 +12,12 @@ LOG_MODULE_REGISTER(esp_serial_loader);
 #include "serial_io.h"
 
 static const struct device *uart_dev;
+#if DT_INST_NODE_HAS_PROP(0, power_gpios)
+static const struct device *power_dev;
+#endif
+#if DT_INST_NODE_HAS_PROP(0, reset_gpios)
 static const struct device *reset_dev;
+#endif
 static const struct device *boot_dev;
 static K_TIMER_DEFINE(loader_timer, NULL, NULL);
 K_MSGQ_DEFINE(rx_queue, 1, 64, 1);
@@ -63,20 +68,33 @@ esp_loader_error_t loader_port_serial_init(const loader_serial_config_t *config)
                 return err;
 
         /* Initialize control pins */
-        reset_dev = device_get_binding(DT_INST_GPIO_LABEL(0, wifi_reset_gpios));
+#if DT_INST_NODE_HAS_PROP(0, power_gpios)
+        power_dev = device_get_binding(DT_INST_GPIO_LABEL(0, power_gpios));
+        ret = gpio_pin_configure(power_dev,
+                                 DT_INST_GPIO_PIN(0, power_gpios),
+                                 DT_INST_GPIO_FLAGS(0, power_gpios)
+                                 | GPIO_OUTPUT_INACTIVE);
+        if (ret < 0) {
+                LOG_ERR("power pin: %d", ret);
+                return ESP_LOADER_ERROR_FAIL;
+        }
+#endif
+#if DT_INST_NODE_HAS_PROP(0, reset_gpios)
+        reset_dev = device_get_binding(DT_INST_GPIO_LABEL(0, reset_gpios));
         ret = gpio_pin_configure(reset_dev,
-                                 DT_INST_GPIO_PIN(0, wifi_reset_gpios),
-                                 DT_INST_GPIO_FLAGS(0, wifi_reset_gpios)
-                                 | GPIO_OUTPUT_ACTIVE);
+                                 DT_INST_GPIO_PIN(0, reset_gpios),
+                                 DT_INST_GPIO_FLAGS(0, reset_gpios)
+                                 | GPIO_OUTPUT_INACTIVE);
         if (ret < 0) {
                 LOG_ERR("reset pin: %d", ret);
                 return ESP_LOADER_ERROR_FAIL;
         }
+#endif
 
-        boot_dev = device_get_binding(DT_INST_GPIO_LABEL(0, wifi_boot_gpios));
+        boot_dev = device_get_binding(DT_INST_GPIO_LABEL(0, boot_gpios));
         ret = gpio_pin_configure(boot_dev,
-                                 DT_INST_GPIO_PIN(0, wifi_boot_gpios),
-                                 DT_INST_GPIO_FLAGS(0, wifi_boot_gpios)
+                                 DT_INST_GPIO_PIN(0, boot_gpios),
+                                 DT_INST_GPIO_FLAGS(0, boot_gpios)
                                  | GPIO_OUTPUT_HIGH);
         if (ret < 0) {
                 LOG_ERR("boot pin: %d", ret);
@@ -137,20 +155,27 @@ timeout:
 void loader_port_enter_bootloader(void)
 {
         /* Set IO0=0 (enter bootloader) and reset */
-        gpio_pin_set(boot_dev, DT_INST_GPIO_PIN(0, wifi_boot_gpios), 0);
+        gpio_pin_set(boot_dev, DT_INST_GPIO_PIN(0, boot_gpios), 0);
         loader_port_reset_target();
         k_msleep(50);
         /* Set IO0=1 */
-        gpio_pin_set(boot_dev, DT_INST_GPIO_PIN(0, wifi_boot_gpios), 1);
+        gpio_pin_set(boot_dev, DT_INST_GPIO_PIN(0, boot_gpios), 1);
 }
 
 void loader_port_reset_target(void)
 {
-        /* Hold in reset (active low) */
-        gpio_pin_set(reset_dev, DT_INST_GPIO_PIN(0, wifi_reset_gpios), 1);
+        /* Turn power off, or hold in reset */
+#if DT_INST_NODE_HAS_PROP(0, power_gpios)
+        gpio_pin_set(power_dev, DT_INST_GPIO_PIN(0, power_gpios), 0);
         k_msleep(1);
-        /* Release reset */
-        gpio_pin_set(reset_dev, DT_INST_GPIO_PIN(0, wifi_reset_gpios), 0);
+        gpio_pin_set(power_dev, DT_INST_GPIO_PIN(0, power_gpios), 1);
+#elif DT_INST_NODE_HAS_PROP(0, reset_gpios)
+        gpio_pin_set(reset_dev, DT_INST_GPIO_PIN(0, reset_gpios), 1);
+        k_msleep(1);
+        gpio_pin_set(reset_dev, DT_INST_GPIO_PIN(0, reset_gpios), 0);
+#else
+        #error Need to define power_gpios or reset_gpios
+#endif
 }
 
 void loader_port_delay_ms(uint32_t ms)

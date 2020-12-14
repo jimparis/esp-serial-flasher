@@ -195,6 +195,8 @@ uint32_t loader_port_remaining_time(void)
 
 void loader_port_debug_print(const char *str)
 {
+        if (str[0] == '\n' && str[1] == '\0')
+                return;
         LOG_DBG("%s", str);
 }
 

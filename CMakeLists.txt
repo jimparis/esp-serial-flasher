@@ -1,8 +1,8 @@
 if(CONFIG_ESP_SERIAL_FLASHER)
 
-  zephyr_interface_library_named(ESP_SERIAL_FLASHER)
+  zephyr_interface_library_named(esp_serial_flasher)
 
-  target_include_directories(ESP_SERIAL_FLASHER INTERFACE include)
+  target_include_directories(esp_serial_flasher INTERFACE include)
 
   zephyr_library_named(modules_esp_serial_flasher)
 
@@ -21,7 +21,12 @@ if(CONFIG_ESP_SERIAL_FLASHER)
     port/zephyr_port.c
     )
 
-  zephyr_library_link_libraries(ESP_SERIAL_FLASHER)
-  target_link_libraries(ESP_SERIAL_FLASHER INTERFACE zephyr_interface)
+  zephyr_library_link_libraries(esp_serial_flasher)
+  target_link_libraries(esp_serial_flasher INTERFACE zephyr_interface)
+
+  # This symbol seems too generic to define globally with
+  # `zephyr_compile_definitions`, so users will be required to define this
+  # as well when including esp_loader.h
+  target_compile_definitions(esp_serial_flasher INTERFACE "MD5_ENABLED")
 
 endif()

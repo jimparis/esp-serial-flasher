@@ -1,0 +1,4 @@
+config ESP_SERIAL_FLASHER
+       bool "ESP serial flasher"
+       help
+        Include esp-serial-flasher module
